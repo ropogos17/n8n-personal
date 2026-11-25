@@ -1,0 +1,326 @@
+{
+  "name": "Wochensplan",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "122wY4nLNktsoxf9-q3vbQg7HnxtF6HPca4OikX5NBHQ",
+          "mode": "list",
+          "cachedResultName": "Wochenplan - Antworten",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/122wY4nLNktsoxf9-q3vbQg7HnxtF6HPca4OikX5NBHQ/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 431964371,
+          "mode": "list",
+          "cachedResultName": "A(z) 1. lapon lévő válaszok",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/122wY4nLNktsoxf9-q3vbQg7HnxtF6HPca4OikX5NBHQ/edit#gid=431964371"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -96,
+        -32
+      ],
+      "id": "eb6cd8fd-6e60-443b-af7b-800c9675e1d0",
+      "name": "Google Sheets Trigger",
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "eDeWsFl1qNhX2lHZ",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.last().json;\n\nconst planKey = Object.keys(row).find(\n  key => key.trim().toLocaleLowerCase(\"de-DE\") === \"wochenplan\"\n);\n\nif (!planKey) {\n  throw new Error(\n    `wochenplan row doesn't exist` +\n    `rows: ${Object.keys(row).join(\", \")}`\n  );\n}\n\nconst rawPlan = String(row[planKey] ?? \"\");\n\nconst lines = rawPlan\n  .split(/\\r?\\n/)\n  .map(line => line.trim())\n  .filter(Boolean);\n\nif (lines.length === 0) {\n  throw new Error(\"The field was empty.\");\n}\n\nconst parts = new Intl.DateTimeFormat(\"en-US\", {\n  timeZone: \"Europe/Berlin\",\n  year: \"numeric\",\n  month: \"2-digit\",\n  day: \"2-digit\",\n}).formatToParts(new Date());\n\nconst dateParts = Object.fromEntries(\n  parts.map(part => [part.type, part.value])\n);\n\nconst today = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;\nconst todayDate = new Date(`${today}T12:00:00.000Z`);\nconst todayWeekday = todayDate.getUTCDay();\n\nfunction normalizeDay(value) {\n  return value\n    .trim()\n    .replace(/\\.$/, \"\")\n    .toLocaleLowerCase(\"hu-HU\")\n    .normalize(\"NFD\")\n    .replace(/[\\u0300-\\u036f]/g, \"\");\n}\n\nconst tasks = lines.map((line, index) => {\n  // Az utolsó \" - \" választja el a feladatot a nap nevétől.\n  const separator = line.lastIndexOf(\" - \");\n\n  if (separator === -1) {\n    throw new Error(\n      `A(z) ${index + 1}. sor hibás: \"${line}\". ` +\n      `Elvárt formátum: Feladat - Nap`\n    );\n  }\n\n  const rawTask = line.slice(0, separator).trim();\n  const rawDay = line.slice(separator + 3).trim();\n  const parsedDay = dayMap[normalizeDay(rawDay)];\n\n  if (!rawTask || !parsedDay) {\n    throw new Error(\n      `A(z) ${index + 1}. sorban hibás a feladat vagy a nap: \"${line}\"`\n    );\n  }\n\n  // A nap legközelebbi mai vagy jövőbeli előfordulása.\n  const offset =\n    (parsedDay.weekday - todayWeekday + 7) % 7;\n\n  const due = new Date(todayDate.getTime());\n  due.setUTCDate(due.getUTCDate() + offset);\n\n  return {\n    raw_task: rawTask,\n    day: parsedDay.day,\n    due_date: due.toISOString().slice(0, 10),\n  };\n});\n\nreturn [\n  {\n    json: {\n      submission_date: today,\n      tasks,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "ad34a788-02e7-4c67-8fe7-f249c960556d",
+      "name": "Prepare Days"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  ({\n    model: \"openai/gpt-oss-20b\",\n    temperature: 0.2,\n    max_completion_tokens: 3000,\n    response_format: {\n      type: \"json_object\"\n    },\n    messages: [\n      {\n        role: \"system\",\n        content: \"A bemeneti tasks tömbből készíts Todoist-feladatokat. Minden bemeneti feladatból pontosan egy kimeneti feladat készüljön. Ne adj hozzá és ne hagyj el feladatot. A due_date értéket pontosan őrizd meg. A title legyen rövid, magyar nyelvű, cselekvést kifejező cím. A description 1-3 mondatban magyarázza el a következő lépéseket. Ne találj ki nem említett követelményeket. A category pontosan egy lehet ezek közül(a TUM az egyetemet jelenti): Russisch lernen, TUM, Arbeit, Training, Sonstiges. Ha tanulásról van szó, akkor TUM, ha projekt elkészítésről, akkor Arbeit. Bizonytalanság esetén válaszd a Sonstiges kategóriát. Kizárólag JSON objektumot adj vissza tasks tömbbel, minden elemben title, description, due_date és category mezőkkel.\"\n      },\n      {\n        role: \"user\",\n        content: JSON.stringify($(\"Prepare Days\").first().json)\n      }\n    ]\n  })\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        512,
+        0
+      ],
+      "id": "aad4a632-5ab3-4499-8604-9a0c319fa471",
+      "name": "Groq - Parse Weekly Plan",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "lonYOz1wQLccae1D",
+          "name": "Groq Bearer"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n\n// A Groq válasza ebben a mezőben tartalmazza\n// az AI által generált JSON-szöveget.\nconst content = response.choices?.[0]?.message?.content;\n\nif (typeof content !== \"string\") {\n  throw new Error(\n    \"Nem találom a Groq válaszában a choices[0].message.content mezőt.\"\n  );\n}\n\nlet parsed;\n\ntry {\n  parsed = JSON.parse(content);\n} catch {\n  throw new Error(\"Az AI válasza nem érvényes JSON.\");\n}\n\nif (!Array.isArray(parsed.tasks)) {\n  throw new Error(\"Az AI válaszából hiányzik a tasks tömb.\");\n}\n\nconst allowedCategories = [\n  \"Russisch lernen\",\n  \"TUM\",\n  \"Arbeit\",\n  \"Training\",\n  \"Sonstiges\"\n];\n\nreturn parsed.tasks.map((task, index) => {\n  const title = String(task.title ?? \"\").trim();\n  const description = String(task.description ?? \"\").trim();\n  const dueDate = String(task.due_date ?? \"\").trim();\n  const category = String(task.category ?? \"\").trim();\n\n  if (!title) {\n    throw new Error(`A(z) ${index + 1}. feladatnak nincs címe.`);\n  }\n\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(dueDate)) {\n    throw new Error(\n      `Érvénytelen dátum a(z) ${index + 1}. feladatnál: ${dueDate}`\n    );\n  }\n\n  if (!allowedCategories.includes(category)) {\n    throw new Error(\n      `Ismeretlen kategória a(z) ${index + 1}. feladatnál: ${category}`\n    );\n  }\n\n  return {\n    json: {\n      title,\n      description,\n      due_date: dueDate,\n      category,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        0
+      ],
+      "id": "45e12737-cd43-49a0-bc05-8ae6c73a400a",
+      "name": "Parse AI JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Beolvassuk az AI által feldolgozott feladatokat.\nconst taskItems = $(\"Parse AI JSON\").all().map(item => item.json);\n\n// 2. Segédfüggvény: kezeli az API-válaszok különböző alakjait.\nfunction extractRecords(items) {\n  const records = [];\n\n  for (const item of items) {\n    const data = item.json;\n\n    if (Array.isArray(data)) {\n      records.push(...data);\n    } else if (Array.isArray(data.results)) {\n      records.push(...data.results);\n    } else if (Array.isArray(data.projects)) {\n      records.push(...data.projects);\n    } else if (Array.isArray(data.sections)) {\n      records.push(...data.sections);\n    } else if (Array.isArray(data.data)) {\n      records.push(...data.data);\n    } else if (Array.isArray(data.body?.results)) {\n      records.push(...data.body.results);\n    } else if (data.id) {\n      records.push(data);\n    }\n  }\n\n  return records;\n}\n\n// 3. Lekérjük a másik node-ok tényleges kimenetét.\nconst projects = extractRecords($(\"Get Projects\").all());\nconst sections = extractRecords($(\"Get Sections\").all());\n\n\n\n// Kis- és nagybetűtől, ékezetektől és írásjelektől független névegyezés.\nfunction normalizeName(value) {\n  return String(value ?? \"\")\n    .normalize(\"NFD\")\n    .replace(/[\\u0300-\\u036f]/g, \"\")\n    .toLowerCase()\n    .replace(/[^a-z0-9]/g, \"\");\n}\n\n// 4. Kikeressük a célprojektet.\nconst targetProjectName = \"Weekly Plan\";\n\n// Ha tesztprojektbe írsz, a fenti nevet cseréld\n// például \"Weekly Plan Test\"-re.\nconst project = projects.find(\n  item => normalizeName(item.name) === normalizeName(targetProjectName)\n);\n\nif (!project) {\n  throw new Error(\n    `Nem találom a(z) \"${targetProjectName}\" projektet. ` +\n    `A lekért projektek: ${projects.map(p => p.name).join(\", \")}`\n  );\n}\n\n// 5. Csak a célprojekthez tartozó szekciókat használjuk.\nconst projectSections = sections.filter(\n  section => String(section.project_id) === String(project.id)\n);\n\nif (projectSections.length === 0) {\n  throw new Error(\n    `A Get Sections nem adott vissza szekciót a Weekly Plan projekthez. ` +\n    `Projekt ID: ${project.id}. ` +\n    `Lekért szekciók: ${sections.map(\n      s => `${s.name} (project_id=${s.project_id})`\n    ).join(\", \")}`\n  );\n}\n\n// Kategóriából szekciót keresünk.\nfunction findSection(category) {\n  return projectSections.find(\n    section => normalizeName(section.name) === normalizeName(category)\n  );\n}\n\n// 6. Ellenőrizzük és átalakítjuk a feladatokat.\nconst allowedCategories = [\n  \"Russisch lernen\",\n  \"TUM\",\n  \"Arbeit\",\n  \"Training\",\n  \"Sonstiges\"\n];\n\nif (taskItems.length === 0) {\n  throw new Error(\"Az AI nem adott vissza feladatokat.\");\n}\n\nreturn taskItems.map((task, index) => {\n  const title = String(task.title ?? \"\").trim();\n  const description = String(task.description ?? \"\").trim();\n  const dueDate = String(task.due_date ?? \"\").trim();\n\n  let category = String(task.category ?? \"\").trim();\n\n  if (!title) {\n    throw new Error(`A(z) ${index + 1}. feladat címe üres.`);\n  }\n\n  // A formátum mellett a naptári dátumot is ellenőrizzük.\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(dueDate)) {\n    throw new Error(\n      `Hibás dátum a(z) ${index + 1}. feladatnál: ${dueDate}`\n    );\n  }\n\n  const date = new Date(`${dueDate}T12:00:00Z`);\n\n  if (\n    Number.isNaN(date.getTime()) ||\n    date.toISOString().slice(0, 10) !== dueDate\n  ) {\n    throw new Error(`Nem létező dátum: ${dueDate}`);\n  }\n\n  // Ismeretlen kategória esetén biztonságos tartalék.\n  if (!allowedCategories.includes(category)) {\n    category = \"Needs Review\";\n  }\n\n  const section = findSection(category);\n\n  if (!section) {\n    throw new Error(\n      `Nem találom a \"${category}\" szekciót ` +\n      `a(z) \"${targetProjectName}\" projektben.`\n    );\n  }\n\n  return {\n    json: {\n      content: title,\n      description,\n      due_date: dueDate,\n      project_id: project.id,\n      section_id: section.id,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        -144
+      ],
+      "id": "1da6e6d8-fcae-4198-9879-577dc0a9950f",
+      "name": "Validate and Map Tasks"
+    },
+    {
+      "parameters": {
+        "url": "https://api.todoist.com/api/v1/sections?project_id=6hqhc7P3FJwcMMR2",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        704,
+        -288
+      ],
+      "id": "a1297ea7-77b0-4074-8de7-ac7ec91f5ab3",
+      "name": "Get Sections",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "KNz6gQmNksplIodA",
+          "name": "Todoist Bearer"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.todoist.com/api/v1/projects",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        384,
+        -288
+      ],
+      "id": "3b8a7b11-c432-48eb-b857-6d07ec773cac",
+      "name": "Get Projects",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "KNz6gQmNksplIodA",
+          "name": "Todoist Bearer"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.todoist.com/api/v1/tasks",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.description }}"
+            },
+            {
+              "name": "due_date",
+              "value": "={{ $json.due_date }}"
+            },
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}"
+            },
+            {
+              "name": "section_id",
+              "value": "={{ $json.section_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1232,
+        -144
+      ],
+      "id": "7a48a1ce-cf02-488d-8c42-ead1e2918d8f",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "KNz6gQmNksplIodA",
+          "name": "Todoist Bearer"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        928,
+        -144
+      ],
+      "id": "366379ab-c1a1-4a5f-b3ae-9c40eb009aff",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Days",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Projects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Days": {
+      "main": [
+        [
+          {
+            "node": "Groq - Parse Weekly Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq - Parse Weekly Plan": {
+      "main": [
+        [
+          {
+            "node": "Parse AI JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI JSON": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get Projects": {
+      "main": [
+        [
+          {
+            "node": "Get Sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sections": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Map Tasks": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Validate and Map Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "42f739df-5e44-41d5-9484-91437ae1c4d6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "6f74e9bdadad53f3f9f6f5285d0508b80df6ffc57b2af63ff287b02dbf7184c0"
+  },
+  "nodeGroups": [],
+  "id": "zvod3ngp0eHV9G1c",
+  "tags": []
+}
